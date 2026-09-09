@@ -11,10 +11,13 @@
         <string>{{SCRIPT}}</string>
     </array>
 
-    <!-- Fire the instant Discord's bundle changes, i.e. an app update swaps app.asar. -->
+    <!-- Fire when Discord's per-user data dir changes. A Discord update stages a
+         new app-<ver> folder here with a fresh, vanilla desktop_core module, so
+         this catches updates within seconds. This is a HOME-folder path, so it
+         works with SIP enabled and never touches the signed .app bundle. -->
     <key>WatchPaths</key>
     <array>
-        <string>/Applications/Discord.app/Contents/Resources</string>
+        <string>{{WATCHDIR}}</string>
     </array>
 
     <!-- Backstops in case a watch event is missed. -->
@@ -23,7 +26,7 @@
     <key>StartInterval</key>
     <integer>3600</integer>
 
-    <!-- Coalesce rapid bundle changes into at most one run per 10s. -->
+    <!-- Coalesce rapid changes into at most one run per 10s. -->
     <key>ThrottleInterval</key>
     <integer>10</integer>
 

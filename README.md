@@ -1,37 +1,68 @@
 # vencord-persist-macos
 
-Keeps [Vencord](https://vencord.dev) patched into the **official Discord.app on macOS**, and re-applies the patch automatically after Discord updates.
+Keeps [Vencord](https://vencord.dev) injected into the **official Discord.app on macOS**, and re-applies it automatically after every Discord update — **with System Integrity Protection (SIP) left enabled** and the signed Discord app never modified.
 
-Vencord works by replacing Discord's `Contents/Resources/app.asar` with a small loader that pulls in the Vencord patcher. Every full Discord app update overwrites that file with a vanilla archive, silently removing Vencord until you re-run the installer. This tool watches the bundle and restores the loader within seconds of an update, then restarts Discord so the patch takes effect — no manual step.
+Use the real Discord client (for working screen-share **with audio**, which [Vesktop](https://github.com/Vencord/Vesktop) can't do on macOS) *and* have Vencord — persistently, without disabling SIP or breaking Discord's code signature.
 
-If you don't specifically need the official client, [Vesktop](https://github.com/Vencord/Vesktop) ships Vencord built in and needs none of this. This project exists for people who want Vencord inside the real Discord.app.
+## Why this exists
+
+The usual way to get Vencord into the real Discord replaces `Discord.app/Contents/Resources/app.asar`. That file lives **inside the code-signed `.app` bundle**, so editing it invalidates Discord's Developer ID signature. On modern macOS (especially Apple Silicon) that means:
+
+- macOS refuses to launch it — *"Discord is damaged and can't be opened"* — unless you either **disable SIP** or **ad-hoc re-sign** the app.
+- Ad-hoc re-signing changes the app's identity, which **breaks the keychain** ("Discord Safe Storage" password prompts every launch), **strips the entitlements** Electron and audio capture need, and makes Discord **self-terminate a few seconds into launch** on the normal Dock path.
+
+So the classic approach forces a bad trade: turn SIP off, or fight the signature forever.
+
+**This project avoids the bundle entirely.**
 
 ## How it works
 
+On macOS, Discord's `.app` in `/Applications` is just a bootstrap. The actual client code is loaded from an **unsigned module in your home folder**:
+
+```
+~/Library/Application Support/discord/app-<version>/modules/
+    discord_desktop_core-<n>/discord_desktop_core/index.js
+```
+
+By default that file is a one-liner:
+
+```js
+module.exports = require('./core.asar');
+```
+
+Because it's a plain JS file **outside the `.app` bundle and outside the code signature**, we can replace it freely. This tool swaps it for a small shim that:
+
+1. Hooks `electron.BrowserWindow` (via Vencord's `patcher.js`) **before** `core.asar` loads, so every window Discord opens gets Vencord's preload injected — exactly what the app.asar method achieves, but from outside the bundle.
+2. Loads the real `./core.asar` so Discord runs normally.
+
+Vencord's `patcher.js` is built for the app.asar layout — during setup it loads the "original app" from a sibling `_app.asar`. To satisfy that with no bundle involved, the shim briefly fakes `require.main` and points it at a local symlink (`vc_shim/_app.asar → ../core.asar`) so the patcher cleanly loads `core.asar`.
+
+The result:
+
+- ✅ **SIP stays on.**
+- ✅ Discord keeps its **real Developer ID signature and entitlements** — no "damaged", no keychain prompts, mic/screen-share audio intact, normal Dock launch.
+- ✅ Every update rebuilds the module vanilla; a `launchd` agent re-applies the shim within seconds and restarts Discord so Vencord loads.
+
+### The agent
+
 A `launchd` agent (`com.vynzyx.vencord-reinject`) runs `reinject.sh` on three triggers:
 
-- **`WatchPaths`** on the Discord bundle — fires the moment an update swaps `app.asar`.
+- **`WatchPaths`** on `~/Library/Application Support/discord` — fires when an update stages a new `app-<version>` folder.
 - **`RunAtLoad`** — at login.
 - **`StartInterval` (hourly)** — a backstop in case a watch event is missed.
 
-`reinject.sh` restores a saved copy of the loader stub whenever `app.asar` is no longer it. A few details that matter:
+`reinject.sh` is idempotent and safe:
 
-- **Detection is a byte comparison** (`cmp`), never a `grep` for `"vencord"` — the real 2.3 MB archive contains those bytes and would false-positive as "already patched."
-- **An atomic `mkdir` lock** guarantees a single instance. The `WatchPaths` event also fires on the script's own write, so without the lock overlapping runs race the restart and spawn duplicate Discord processes.
-- **A size guard** skips partial `app.asar` writes mid-update, so a half-written file is never preserved as the "real" archive.
-- **Discord is only restarted after an actual repatch**, and only if it's running.
+- **A sentinel comment** marks an already-injected module, so re-runs are no-ops (never double-patches).
+- **An atomic `mkdir` lock** guarantees a single instance; the `WatchPaths` event also fires on the script's own writes, so without the lock overlapping runs would race the restart.
+- **The pristine `index.js` is saved** as `index.js.orig` for a clean revert.
+- **Discord is only restarted after an actual (re)patch**, and only if it's running.
 
 ## Requirements
 
-- macOS.
-- Vencord already installed via the [official installer](https://vencord.dev/download). This tool captures the loader from your patched Discord — it does not ship one.
-- **System Integrity Protection (SIP) disabled.**
-
-### About SIP
-
-macOS protects other apps' bundles (App Management / SIP), so a background process cannot modify `Discord.app` while SIP is enabled. Disabling SIP (`csrutil disable` from Recovery) is what makes the automatic re-patch possible.
-
-**This is a real security tradeoff.** SIP is a core macOS protection; turning it off weakens your system's defenses against tampering. Understand what you're giving up before doing this, and consider [Vesktop](https://github.com/Vencord/Vesktop) instead if you're not comfortable with it. `install.sh` refuses to run while SIP is enabled.
+- macOS (Apple Silicon or Intel). **SIP can stay enabled.**
+- Discord installed in `/Applications`.
+- **Vencord installed** via the [official installer](https://vencord.dev/download) — this tool reuses its `dist/patcher.js`. You do **not** need to keep Vencord's own auto-patch/"Patch Discord" enabled; this replaces it with an update-proof one.
 
 ## Install
 
@@ -41,7 +72,7 @@ cd vencord-persist-macos
 ./install.sh
 ```
 
-The installer verifies your environment, captures the loader stub into `~/.vencord-persist/`, generates the `launchd` agent with the correct paths, and loads it.
+The installer verifies your environment, installs `reinject.sh` into `~/.vencord-persist/`, generates the `launchd` agent with the correct paths, loads it, and injects immediately. Restart Discord once to load Vencord this session.
 
 ## Uninstall
 
@@ -49,21 +80,23 @@ The installer verifies your environment, captures the loader stub into `~/.venco
 ./uninstall.sh
 ```
 
-Removes the agent and `~/.vencord-persist/`. Discord and Vencord are left as they are; use the official installer's uninstall to remove Vencord itself.
+Unloads the agent and reverts every patched module back to vanilla (`index.js.orig`). Discord and Vencord are left installed; use the official Vencord installer to remove Vencord itself.
 
 ## Layout
 
 | Path | Purpose |
 | --- | --- |
-| `~/.vencord-persist/reinject.sh` | The re-patch script (installed copy). |
-| `~/.vencord-persist/vencord-app.asar` | Captured Vencord loader stub. |
+| `~/.vencord-persist/reinject.sh` | The re-injection script (installed copy). |
 | `~/.vencord-persist/reinject.log` | Activity log. |
 | `~/Library/LaunchAgents/com.vynzyx.vencord-reinject.plist` | The agent. |
+| `…/discord_desktop_core/index.js` | Injection point (replaced with the shim). |
+| `…/discord_desktop_core/index.js.orig` | Saved pristine original, for revert. |
 
 ## Caveats
 
-- Files re-patch within seconds, but Vencord only loads at Discord launch. If an update relaunches Discord faster than the watch fires, that one session runs vanilla until the next restart.
-- A repatch during an active call will restart Discord and drop the call. This only happens at the moment of a full app update.
+- The shim relies on Discord's `desktop_core` module layout and Vencord's patcher internals. Both are stable in practice, but a future major change to either could need a tweak — the agent re-applies cleanly regardless.
+- A repatch happens at the moment of a full Discord update and restarts Discord, which would drop an active call at that instant.
+- Vencord only loads at Discord launch; the agent restarts Discord after re-patching so this is automatic.
 
 ## License
 
